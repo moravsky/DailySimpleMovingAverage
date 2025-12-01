@@ -2,7 +2,6 @@
 
 using System;
 using System.Drawing;
-using System.Linq;
 using TradingPlatform.BusinessLayer;
 
 namespace DailySimpleMovingAverage
@@ -12,6 +11,8 @@ namespace DailySimpleMovingAverage
     /// </summary>
     public class DailySimpleMovingAverage : Indicator
     {
+        private const string LOG_PREFIX = "DSMA";
+
         [InputParameter("Period", 0, 1, 999, 1, 0)]
         public int LookbackPeriod = 5;
 
@@ -31,7 +32,10 @@ namespace DailySimpleMovingAverage
         private HistoricalData _dailyHistory;
 
         // Built-in SMA indicator applied to daily history
-        private Indicator _dailySma;
+        //private Indicator _dailySma;
+
+        // Track initialization state
+        private bool _initialized = false;
 
         public DailySimpleMovingAverage()
             : base()
@@ -51,78 +55,155 @@ namespace DailySimpleMovingAverage
 
             Name = $"Daily SMA ({LookbackPeriod})";
 
-            // Calculate start date accounting for weekends and holidays
-            DateTime startDate = CalculateLookbackDate(Core.Instance.TimeUtils.DateTimeUtcNow, LookbackPeriod);
+            try
+            {
+                if (Symbol == null)
+                {
+                    Log("Init failed: Symbol is null", LoggingLevel.Error);
+                    return;
+                }
 
-            // Get daily history - auto-updates because no end date specified
-            _dailyHistory = Symbol.GetHistory(
-                Period.DAY1,  // Daily bars
-                Symbol.HistoryType,
-                startDate
-            );
+                if (!LoadDailyHistory())
+                {
+                    return;
+                }
 
-            // Create built-in SMA indicator on the daily history
-            _dailySma = Core.Indicators.BuiltIn.SMA(LookbackPeriod, PriceType.Close);
-            _dailyHistory.AddIndicator(_dailySma);
-
+                _initialized = true;
+            }
+            catch (Exception ex)
+            {
+                Log($"Init failed with exception: {ex.Message}\n{ex.StackTrace}", LoggingLevel.Error);
+            }
         }
 
-        private static DateTime CalculateLookbackDate(DateTime endDate, int requiredTradingDays)
+        private bool LoadDailyHistory()
         {
-            DateTime currentDate = endDate;
-            int tradingDaysFound = 0;
+            int calendarDaysBack = LookbackPeriod;
+            int maxAttempts = 5;
+            int attempt = 0;
 
-            while (tradingDaysFound < requiredTradingDays)
+            for (attempt = 0; attempt < maxAttempts; attempt++)
             {
-                if (currentDate.DayOfWeek >= DayOfWeek.Monday &&
-                    currentDate.DayOfWeek <= DayOfWeek.Friday)
+                DateTime startDate = Core.Instance.TimeUtils.DateTimeUtcNow.AddDays(-calendarDaysBack);
+
+                try
                 {
-                    tradingDaysFound++;
+                    _dailyHistory?.Dispose();
+                    _dailyHistory = Symbol.GetHistory(
+                        Period.DAY1,
+                        Symbol.HistoryType,
+                        startDate
+                    );
                 }
-                currentDate = currentDate.AddDays(-1);
+                catch (Exception ex)
+                {
+                    Log($"GetHistory failed: {ex.Message}", LoggingLevel.Error);
+                    return false;
+                }
+
+                if (_dailyHistory == null)
+                {
+                    Log("GetHistory returned null", LoggingLevel.Error);
+                    return false;
+                }
+
+                if (_dailyHistory.Count >= LookbackPeriod)
+                {
+                    return true;
+                }
+
+                // Calculate exactly how many more trading days we need
+                int barsNeeded = LookbackPeriod - _dailyHistory.Count;
+                calendarDaysBack += barsNeeded;
             }
 
-            return currentDate;
+            Log($"Init failed: Insufficient data after {maxAttempts} attempts. Got {_dailyHistory?.Count ?? 0}, need {LookbackPeriod}", LoggingLevel.Error);
+            return false;
         }
 
         protected override void OnUpdate(UpdateArgs args)
         {
-            // Need enough daily bars and valid SMA
-            if (_dailyHistory == null || _dailyHistory.Count < LookbackPeriod || _dailySma == null)
+            if (!_initialized)
             {
                 return;
             }
 
-            double dailyValueSum = GetPrice(HistoryPriceType);
-
-            for (int i = 1; i < LookbackPeriod; i++)
+            try
             {
-                var dailyBar = _dailyHistory[i];
-                dailyValueSum += dailyBar[HistoryPriceType];
+                if (_dailyHistory.Count < LookbackPeriod)
+                {
+                    Log($"OnUpdate: Insufficient daily bars. Have {_dailyHistory.Count}, need {LookbackPeriod}", LoggingLevel.Error);
+                    return;
+                }
+
+                double dailyValueSum = GetPrice(HistoryPriceType);
+
+                if (double.IsNaN(dailyValueSum))
+                {
+                    Log($"OnUpdate: GetPrice returned NaN for {HistoryPriceType}", LoggingLevel.Error);
+                    return;
+                }
+
+                for (int i = 1; i < LookbackPeriod; i++)
+                {
+                    var dailyBar = _dailyHistory[i];
+
+                    if (dailyBar == null)
+                    {
+                        Log($"OnUpdate: Daily bar at index {i} is null", LoggingLevel.Error);
+                        return;
+                    }
+
+                    double barValue = dailyBar[HistoryPriceType];
+
+                    if (double.IsNaN(barValue))
+                    {
+                        Log($"OnUpdate: Daily bar[{i}] {HistoryPriceType} is NaN", LoggingLevel.Error);
+                        return;
+                    }
+
+                    dailyValueSum += barValue;
+                }
+
+                double dailySmaValue = dailyValueSum / LookbackPeriod;
+
+                if (double.IsNaN(dailySmaValue) || double.IsInfinity(dailySmaValue))
+                {
+                    Log($"OnUpdate: Calculated SMA is invalid: {dailySmaValue}", LoggingLevel.Error);
+                    return;
+                }
+
+                SetValue(dailySmaValue);
             }
-
-            // Get the current daily SMA value
-            double dailySmaValue = dailyValueSum / LookbackPeriod;
-
-            // Check for valid value
-            if (double.IsNaN(dailySmaValue))
+            catch (Exception ex)
             {
-                return;
+                Log($"OnUpdate exception: {ex.Message}\n{ex.StackTrace}", LoggingLevel.Error);
             }
-
-            // Plot the value
-            SetValue(dailySmaValue);
         }
 
         protected override void OnClear()
         {
-            if (_dailyHistory != null)
+            try
             {
-                _dailyHistory.Dispose();
-                _dailyHistory = null;
+                if (_dailyHistory != null)
+                {
+                    _dailyHistory.Dispose();
+                    _dailyHistory = null;
+                }
+
+                _initialized = false;
+            }
+            catch (Exception ex)
+            {
+                Log($"OnClear exception: {ex.Message}", LoggingLevel.Error);
             }
 
             base.OnClear();
+        }
+
+        private void Log(string message, LoggingLevel level = LoggingLevel.Trading)
+        {
+            Core.Loggers.Log($"[{LOG_PREFIX}] {Symbol?.Name ?? "?"}: {message}", level);
         }
     }
 }
