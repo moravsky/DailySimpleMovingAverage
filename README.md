@@ -49,6 +49,4 @@ The indicator automatically fetches daily bar data regardless of your chart's ti
 - Handles market holidays and weekends by extending lookback if insufficient bars are returned
 - Logs errors to Quantower's log panel with `[DSMA]` prefix for easy filtering
 
-## License
-
 Copyright © 2025 Structured Trading LLC. All rights reserved.
