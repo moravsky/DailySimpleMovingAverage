@@ -79,7 +79,7 @@ namespace DailySimpleMovingAverage
         private bool LoadDailyHistory()
         {
             int calendarDaysBack = LookbackPeriod;
-            int maxAttempts = 5;
+            int maxAttempts = 10;
             int attempt = 0;
 
             for (attempt = 0; attempt < maxAttempts; attempt++)
